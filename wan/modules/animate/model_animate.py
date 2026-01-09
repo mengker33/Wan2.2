@@ -79,12 +79,8 @@ class WanAnimateSelfAttention(WanSelfAttention):
         q = apply_rotary_pos_emb(q, *freqs, None, 0, RotaryPosEmbeddingMode.PAIRWISE)
         k = apply_rotary_pos_emb(k, *freqs, None, 0, RotaryPosEmbeddingMode.PAIRWISE)
 
-        x = attention(
-            q=q, #rope_apply_gaudi(q, grid_sizes, freqs),
-            k=k, #rope_apply_gaudi(k, grid_sizes, freqs),
-            v=v,
-            k_lens=seq_lens,
-            window_size=self.window_size)
+        x = self.fav3.forward(q, k, v)
+        htcore.mark_step()
 
         # output
         x = x.flatten(2)
@@ -138,9 +134,9 @@ class WanAnimateCrossAttention(WanSelfAttention):
         if self.use_img_emb:
             k_img = self.norm_k_img(self.k_img(context_img)).view(b, -1, n, d)
             v_img = self.v_img(context_img).view(b, -1, n, d)
-            img_x = attention(q, k_img, v_img, k_lens=None)
+            img_x = self.fav3.forward(q, k_img, v_img)
         # compute attention
-        x = attention(q, k, v, k_lens=context_lens)
+        x = self.fav3.forward(q, k, v)
 
         # output
         x = x.flatten(2)
@@ -429,6 +425,15 @@ class WanAnimateModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
             context_clip = self.img_emb(clip_fea) # bs x 257 x dim
             context = torch.concat([context_clip, context], dim=1)
 
+
+        if self.use_context_parallel:
+            x = torch.chunk(x, get_world_size(), dim=1)[get_rank()]
+
+            cos, sin = freqs
+            cos = torch.chunk(cos, get_world_size(), dim=1)[get_rank()]
+            sin = torch.chunk(sin, get_world_size(), dim=1)[get_rank()]
+            freqs = (cos, sin)
+
         # arguments
         kwargs = dict(
             e=e0,
@@ -437,9 +442,6 @@ class WanAnimateModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
             freqs=freqs,
             context=context,
             context_lens=context_lens)
-
-        if self.use_context_parallel:
-            x = torch.chunk(x, get_world_size(), dim=1)[get_rank()]
 
         for idx, block in enumerate(self.blocks):
             x = block(x, **kwargs)
