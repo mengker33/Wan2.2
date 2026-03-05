@@ -3,6 +3,7 @@ import argparse
 import logging
 import os
 import sys
+import time
 import warnings
 from datetime import datetime
 
@@ -324,9 +325,9 @@ def generate(args):
         logging.info(
             f"offload_model is not specified, set to {args.offload_model}.")
     if world_size > 1:
-        torch.cuda.set_device(local_rank)
+        torch.xpu.set_device(local_rank)
         dist.init_process_group(
-            backend="nccl",
+            backend="xccl",
             init_method="env://",
             rank=rank,
             world_size=world_size)
@@ -365,10 +366,14 @@ def generate(args):
     logging.info(f"Generation job args: {args}")
     logging.info(f"Generation model config: {cfg}")
 
-    if dist.is_initialized():
-        base_seed = [args.base_seed] if rank == 0 else [None]
-        dist.broadcast_object_list(base_seed, src=0)
-        args.base_seed = base_seed[0]
+    # MK: dist.broadcast_object_list has hang.
+    # if dist.is_initialized():
+        # base_seed = [args.base_seed] if rank == 0 else [None]
+        # dist.broadcast_object_list(base_seed, src=0)
+        # MK: Replace with broadcast also has hang issue later at dist.barrier()
+        # if base_seed[0] is not None:
+        #     dist.broadcast(torch.tensor(base_seed[0]).to('xpu'), src=0)
+        # args.base_seed = base_seed[0]
 
     logging.info(f"Input prompt: {args.prompt}")
     img = None
@@ -415,6 +420,7 @@ def generate(args):
         )
 
         logging.info(f"Generating video ...")
+        t0 = time.time()
         video = wan_t2v.generate(
             args.prompt,
             size=SIZE_CONFIGS[args.size],
@@ -440,6 +446,7 @@ def generate(args):
         )
 
         logging.info(f"Generating video ...")
+        t0 = time.time()
         video = wan_ti2v.generate(
             args.prompt,
             img=img,
@@ -468,6 +475,7 @@ def generate(args):
         )
 
         logging.info(f"Generating video ...")
+        t0 = time.time()
         video = wan_animate.generate(
             src_root_path=args.src_root_path,
             replace_flag=args.replace_flag,
@@ -493,6 +501,7 @@ def generate(args):
             convert_model_dtype=args.convert_model_dtype,
         )
         logging.info(f"Generating video ...")
+        t0 = time.time()
         video = wan_s2v.generate(
             input_prompt=args.prompt,
             ref_image_path=args.image,
@@ -527,6 +536,7 @@ def generate(args):
             convert_model_dtype=args.convert_model_dtype,
         )
         logging.info("Generating video ...")
+        t0 = time.time()
         video = wan_i2v.generate(
             args.prompt,
             img,
@@ -538,6 +548,14 @@ def generate(args):
             guide_scale=args.sample_guide_scale,
             seed=args.base_seed,
             offload_model=args.offload_model)
+
+    torch.xpu.synchronize()
+    if dist.is_initialized():
+        dist.barrier()
+    t1 = time.time()
+    duration = t1 - t0
+    if rank == 0:
+        print("Wan Generation Latency {:.1f} sec".format(duration))
 
     if rank == 0:
         if args.save_file is None:
@@ -562,7 +580,10 @@ def generate(args):
                 merge_video_audio(video_path=args.save_file, audio_path="tts.wav")
     del video
 
-    torch.cuda.synchronize()
+    if torch.xpu.is_available():
+        torch.xpu.synchronize()
+    else:
+        torch.cuda.synchronize()
     if dist.is_initialized():
         dist.barrier()
         dist.destroy_process_group()

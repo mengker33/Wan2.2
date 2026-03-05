@@ -10,7 +10,6 @@ from contextlib import contextmanager
 from functools import partial
 
 import torch
-import torch.cuda.amp as amp
 import torch.distributed as dist
 from tqdm import tqdm
 
@@ -69,7 +68,7 @@ class WanT2V:
                 Convert DiT model parameters dtype to 'config.param_dtype'.
                 Only works without FSDP.
         """
-        self.device = torch.device(f"cuda:{device_id}")
+        self.device = torch.device(f"xpu:{device_id}")
         self.config = config
         self.rank = rank
         self.t5_cpu = t5_cpu
@@ -196,6 +195,10 @@ class WanT2V:
                 getattr(self, offload_model_name).to('cpu')
             if next(getattr(
                     self,
+                    offload_model_name).parameters()).device.type == 'xpu':
+                getattr(self, offload_model_name).to('cpu')
+            if next(getattr(
+                    self,
                     required_model_name).parameters()).device.type == 'cpu':
                 getattr(self, required_model_name).to(self.device)
         return getattr(self, required_model_name)
@@ -298,7 +301,7 @@ class WanT2V:
 
         # evaluation mode
         with (
-                torch.amp.autocast('cuda', dtype=self.param_dtype),
+                torch.autocast(device_type='xpu', dtype=self.param_dtype, enabled=True),
                 torch.no_grad(),
                 no_sync_low_noise(),
                 no_sync_high_noise(),
@@ -363,7 +366,7 @@ class WanT2V:
             if offload_model:
                 self.low_noise_model.cpu()
                 self.high_noise_model.cpu()
-                torch.cuda.empty_cache()
+                torch.xpu.empty_cache()
             if self.rank == 0:
                 videos = self.vae.decode(x0)
 
@@ -371,7 +374,7 @@ class WanT2V:
         del sample_scheduler
         if offload_model:
             gc.collect()
-            torch.cuda.synchronize()
+            torch.xpu.synchronize()
         if dist.is_initialized():
             dist.barrier()
 

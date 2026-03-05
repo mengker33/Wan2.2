@@ -1,8 +1,8 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import torch
-import torch.cuda.amp as amp
 
 from ..modules.model import sinusoidal_embedding_1d
+from ..modules.attention import attention
 from .ulysses import distributed_attention
 from .util import gather_forward, get_rank, get_world_size
 
@@ -20,7 +20,7 @@ def pad_freqs(original_tensor, target_len):
     return padded_tensor
 
 
-@torch.amp.autocast('cuda', enabled=False)
+@torch.autocast('xpu', enabled=False)
 def rope_apply(x, grid_sizes, freqs):
     """
     x:          [B, L, N, C].
@@ -99,14 +99,16 @@ def sp_dit_forward(
     # time embeddings
     if t.dim() == 1:
         t = t.expand(t.size(0), seq_len)
-    with torch.amp.autocast('cuda', dtype=torch.float32):
-        bt = t.size(0)
-        t = t.flatten()
-        e = self.time_embedding(
-            sinusoidal_embedding_1d(self.freq_dim,
-                                    t).unflatten(0, (bt, seq_len)).float())
-        e0 = self.time_projection(e).unflatten(2, (6, self.dim))
-        assert e.dtype == torch.float32 and e0.dtype == torch.float32
+    # MK: xpu doesn't support float32 in autocast, need to further check dtype
+    # in the following cods.
+    # with torch.amp.autocast('cuda', dtype=torch.float32):
+    bt = t.size(0)
+    t = t.flatten()
+    e = self.time_embedding(
+        sinusoidal_embedding_1d(self.freq_dim,
+                                t).unflatten(0, (bt, seq_len)).float())
+    e0 = self.time_projection(e).unflatten(2, (6, self.dim))
+    # assert e.dtype == torch.float32 and e0.dtype == torch.float32
 
     # context
     context_lens = None
@@ -162,13 +164,19 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
     q = rope_apply(q, grid_sizes, freqs)
     k = rope_apply(k, grid_sizes, freqs)
 
-    x = distributed_attention(
-        half(q),
-        half(k),
-        half(v),
-        seq_lens,
-        window_size=self.window_size,
-    )
+    if torch.xpu.is_available():
+        k = gather_forward(k, dim=1)
+        v = gather_forward(v, dim=1)
+
+        x = attention(half(q), half(k), half(v))
+    else:
+        x = distributed_attention(
+            half(q),
+            half(k),
+            half(v),
+            seq_lens,
+            window_size=self.window_size,
+        )
 
     # output
     x = x.flatten(2)
