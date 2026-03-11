@@ -222,6 +222,12 @@ def _parse_args():
         action="store_true",
         default=False,
         help="Whether to convert model paramerters dtype.")
+    parser.add_argument(
+        "--attn_type",
+        type=str,
+        default="sdpa",
+        choices=["sdpa", "sage_triton"],
+        help="The type of attention to use. Choose from 'sdpa', 'sage_triton'")
 
     # animate
     parser.add_argument(
@@ -417,6 +423,7 @@ def generate(args):
             use_sp=(args.ulysses_size > 1),
             t5_cpu=args.t5_cpu,
             convert_model_dtype=args.convert_model_dtype,
+            attn_type=args.attn_type,
         )
 
         logging.info(f"Generating video ...")
@@ -443,6 +450,7 @@ def generate(args):
             use_sp=(args.ulysses_size > 1),
             t5_cpu=args.t5_cpu,
             convert_model_dtype=args.convert_model_dtype,
+            attn_type=args.attn_type,
         )
 
         logging.info(f"Generating video ...")

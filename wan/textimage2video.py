@@ -44,6 +44,7 @@ class WanTI2V:
         t5_cpu=False,
         init_on_cpu=True,
         convert_model_dtype=False,
+        attn_type="sdpa",
     ):
         r"""
         Initializes the Wan text-to-video generation model components.
@@ -105,7 +106,8 @@ class WanTI2V:
             use_sp=use_sp,
             dit_fsdp=dit_fsdp,
             shard_fn=shard_fn,
-            convert_model_dtype=convert_model_dtype)
+            convert_model_dtype=convert_model_dtype,
+            attn_type=attn_type)
 
         if use_sp:
             self.sp_size = get_world_size()
@@ -115,7 +117,7 @@ class WanTI2V:
         self.sample_neg_prompt = config.sample_neg_prompt
 
     def _configure_model(self, model, use_sp, dit_fsdp, shard_fn,
-                         convert_model_dtype):
+                         convert_model_dtype, attn_type):
         """
         Configures a model object. This includes setting evaluation modes,
         applying distributed parallel strategy, and handling device placement.
@@ -157,8 +159,12 @@ class WanTI2V:
                 model.to(self.device)
 
         # multi-cards not benifit from torch.compile
-        if not dist.is_initialized():
+        if not dist.is_initialized() and attn_type != "sage_triton":
             model = torch.compile(model)
+
+        if attn_type == "sage_triton":
+            for block in model.blocks:
+                block.self_attn.use_sage_attn = True
 
         return model
 

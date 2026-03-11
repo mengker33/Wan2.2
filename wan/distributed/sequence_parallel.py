@@ -3,6 +3,7 @@ import torch
 
 from ..modules.model import sinusoidal_embedding_1d
 from ..modules.attention import attention
+from ..modules.sage_attention import sageattn_qk_int8_pv_fp16_triton
 from .ulysses import distributed_attention
 from .util import gather_forward, get_rank, get_world_size
 
@@ -168,7 +169,15 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
         k = gather_forward(k, dim=1)
         v = gather_forward(v, dim=1)
 
-        x = attention(half(q), half(k), half(v))
+        if self.use_sage_attn:
+            x = sageattn_qk_int8_pv_fp16_triton(
+                q=half(q),
+                k=half(k),
+                v=half(v),
+                tensor_layout='NHD',
+            )
+        else:
+            x = attention(half(q), half(k), half(v))
     else:
         x = distributed_attention(
             half(q),

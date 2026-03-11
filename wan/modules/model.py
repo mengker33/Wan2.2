@@ -7,6 +7,8 @@ from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
 
 from .attention import flash_attention, attention
+from .sage_attention import sageattn_qk_int8_pv_fp16_triton
+from .flash_attention_triton import flash_attention_xpu
 
 __all__ = ['WanModel']
 
@@ -122,6 +124,7 @@ class WanSelfAttention(nn.Module):
         self.o = nn.Linear(dim, dim)
         self.norm_q = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
+        self.use_sage_attn = False
 
     def forward(self, x, seq_lens, grid_sizes, freqs):
         r"""
@@ -143,10 +146,17 @@ class WanSelfAttention(nn.Module):
         q, k, v = qkv_fn(x)
 
         if torch.xpu.is_available():
-            x = attention(
-                q=rope_apply(q, grid_sizes, freqs),
-                k=rope_apply(k, grid_sizes, freqs),
-                v=v)
+            if self.use_sage_attn:
+                x = sageattn_qk_int8_pv_fp16_triton(
+                    q=rope_apply(q, grid_sizes, freqs).to(torch.bfloat16),
+                    k=rope_apply(k, grid_sizes, freqs).to(torch.bfloat16),
+                    v=v,
+                    tensor_layout='NHD',)
+            else:
+                x = attention(
+                    q=rope_apply(q, grid_sizes, freqs),
+                    k=rope_apply(k, grid_sizes, freqs),
+                    v=v)
         else:
             x = flash_attention(
                 q=rope_apply(q, grid_sizes, freqs),
@@ -179,7 +189,7 @@ class WanCrossAttention(WanSelfAttention):
 
         # compute attention
         if torch.xpu.is_available():
-            x = attention(q, k, v)
+           x = attention(q, k, v)
         else:
             x = flash_attention(q, k, v, k_lens=context_lens)
 
