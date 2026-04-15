@@ -1,5 +1,7 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import math
+import os
+import sys
 
 import torch
 import torch.nn as nn
@@ -8,7 +10,23 @@ from diffusers.models.modeling_utils import ModelMixin
 
 from .attention import flash_attention, attention
 from .sage_attention import sageattn_qk_int8_pv_fp16_triton
-from .flash_attention_triton import flash_attention_xpu
+
+import importlib
+try:
+    importlib.import_module("sycl_tla_fmha")
+    from sycl_tla_fmha import prefill_bf16_tensor
+except ImportError:
+    prefill_bf16_tensor = None
+
+ark_kernel_path = os.getenv('WAN_ARK_KERNEL_PATH')
+if ark_kernel_path and ark_kernel_path not in sys.path:
+    sys.path.insert(0, ark_kernel_path)
+
+try:
+    auto_round_kernel = importlib.import_module("auto_round_kernel")
+except ImportError:
+    auto_round_kernel = None
+
 
 __all__ = ['WanModel']
 
@@ -65,7 +83,7 @@ def rope_apply(x, grid_sizes, freqs):
 
         # append to collection
         output.append(x_i)
-    return torch.stack(output).float()
+    return torch.stack(output)
 
 
 class WanRMSNorm(nn.Module):
@@ -125,6 +143,50 @@ class WanSelfAttention(nn.Module):
         self.norm_q = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.use_sage_attn = False
+        self.sage_attn_tune_kernel = False
+        self.sage_attn_print_tuned = False
+        self.use_ark_sage_attn = False
+        self.ark_sage_block_size = 64
+        self._ark_sage = None
+        self.use_sycl_tla_fmha = False
+
+    def set_attention_backend(
+        self,
+        attn_type,
+        sage_attn_tune_kernel=False,
+        sage_attn_print_tuned=False,
+        ark_sage_block_size=64,
+    ):
+        self.use_sage_attn = False
+        self.use_ark_sage_attn = False
+        self.use_sycl_tla_fmha = False
+        self.sage_attn_tune_kernel = sage_attn_tune_kernel
+        self.sage_attn_print_tuned = sage_attn_print_tuned
+        self.ark_sage_block_size = ark_sage_block_size
+
+        if attn_type == 'sdpa':
+            return
+        if attn_type == 'sage_triton':
+            self.use_sage_attn = True
+            return
+        if attn_type == 'ark_sa':
+            if auto_round_kernel is None:
+                raise RuntimeError(
+                    'attn_type=ark_sa requested but auto_round_kernel is unavailable; '
+                    'install the ARK extension or set WAN_ARK_KERNEL_PATH to the ARK package root'
+                )
+            if self._ark_sage is None:
+                self._ark_sage = auto_round_kernel.ARK()
+            if self._ark_sage is None or self._ark_sage.xpu_lib is None:
+                raise RuntimeError('attn_type=ark_sa requested but ARK XPU kernel is unavailable')
+            self.use_ark_sage_attn = True
+            return
+        if attn_type == 'sycl_tla_fa':
+            if prefill_bf16_tensor is None:
+                raise RuntimeError('attn_type=sycl_tla_fa requested but sycl_tla_fmha is unavailable')
+            self.use_sycl_tla_fmha = True
+            return
+        raise ValueError(f'Unsupported attention backend: {attn_type}')
 
     def forward(self, x, seq_lens, grid_sizes, freqs):
         r"""
@@ -144,23 +206,59 @@ class WanSelfAttention(nn.Module):
             return q, k, v
 
         q, k, v = qkv_fn(x)
+        q_rope = rope_apply(q, grid_sizes, freqs)
+        k_rope = rope_apply(k, grid_sizes, freqs)
 
         if torch.xpu.is_available():
-            if self.use_sage_attn:
+            if self.use_ark_sage_attn:
+                if self._ark_sage is None or self._ark_sage.xpu_lib is None:
+                    raise RuntimeError('attn_type=ark_sa requested but ARK XPU kernel is unavailable')
+                # ARK SAGE expects [B, H, S, D], while Wan tensors are [B, S, H, D].
+                q_t = q_rope.transpose(1, 2).contiguous()
+                k_t = k_rope.transpose(1, 2).contiguous()
+                v_t = v.type_as(q_t).transpose(1, 2).contiguous()
+                x = self._ark_sage.sagev1(
+                    q_t,
+                    k_t,
+                    v_t,
+                    is_causal=False,
+                    scale=1.0 / math.sqrt(d),
+                    quant_block_size=self.ark_sage_block_size,
+                )
+                x = x.transpose(1, 2).contiguous()
+            elif self.use_sycl_tla_fmha:
+                q_t = q_rope.transpose(1, 2).to(torch.bfloat16)
+                k_t = k_rope.transpose(1, 2).to(torch.bfloat16)
+                v_t = v.transpose(1, 2)
+
+                x = prefill_bf16_tensor(
+                    q=q_t,
+                    k=k_t,
+                    v=v_t,
+                    is_causal=False,
+                    iterations=1,
+                    warmup=0,
+                    verify=0,
+                )
+
+                x = x.to(torch.bfloat16).transpose(1, 2).contiguous()
+            elif self.use_sage_attn:
                 x = sageattn_qk_int8_pv_fp16_triton(
-                    q=rope_apply(q, grid_sizes, freqs).to(torch.bfloat16),
-                    k=rope_apply(k, grid_sizes, freqs).to(torch.bfloat16),
+                    q=q_rope.to(torch.bfloat16),
+                    k=k_rope.to(torch.bfloat16),
                     v=v,
-                    tensor_layout='NHD',)
+                    tensor_layout='NHD',
+                    tune_kernel=self.sage_attn_tune_kernel,
+                    print_tuned_config=self.sage_attn_print_tuned,)
             else:
                 x = attention(
-                    q=rope_apply(q, grid_sizes, freqs),
-                    k=rope_apply(k, grid_sizes, freqs),
-                    v=v)
+                    q=q_rope.to(torch.bfloat16),
+                    k=k_rope.to(torch.bfloat16),
+                    v=v.to(torch.bfloat16))
         else:
             x = flash_attention(
-                q=rope_apply(q, grid_sizes, freqs),
-                k=rope_apply(k, grid_sizes, freqs),
+                q=q_rope,
+                k=k_rope,
                 v=v,
                 k_lens=seq_lens,
                 window_size=self.window_size)

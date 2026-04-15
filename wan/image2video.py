@@ -43,6 +43,10 @@ class WanI2V:
         t5_cpu=False,
         init_on_cpu=True,
         convert_model_dtype=False,
+        attn_type="sdpa",
+        sage_attn_tune_kernel=False,
+        sage_attn_print_tuned=False,
+        ark_sage_block_size=64,
     ):
         r"""
         Initializes the image-to-video generation model components.
@@ -107,7 +111,11 @@ class WanI2V:
             use_sp=use_sp,
             dit_fsdp=dit_fsdp,
             shard_fn=shard_fn,
-            convert_model_dtype=convert_model_dtype)
+            convert_model_dtype=convert_model_dtype,
+            attn_type=attn_type,
+            sage_attn_tune_kernel=sage_attn_tune_kernel,
+            sage_attn_print_tuned=sage_attn_print_tuned,
+            ark_sage_block_size=ark_sage_block_size)
 
         self.high_noise_model = WanModel.from_pretrained(
             checkpoint_dir, subfolder=config.high_noise_checkpoint)
@@ -116,7 +124,11 @@ class WanI2V:
             use_sp=use_sp,
             dit_fsdp=dit_fsdp,
             shard_fn=shard_fn,
-            convert_model_dtype=convert_model_dtype)
+            convert_model_dtype=convert_model_dtype,
+            attn_type=attn_type,
+            sage_attn_tune_kernel=sage_attn_tune_kernel,
+            sage_attn_print_tuned=sage_attn_print_tuned,
+            ark_sage_block_size=ark_sage_block_size)
         if use_sp:
             self.sp_size = get_world_size()
         else:
@@ -125,7 +137,9 @@ class WanI2V:
         self.sample_neg_prompt = config.sample_neg_prompt
 
     def _configure_model(self, model, use_sp, dit_fsdp, shard_fn,
-                         convert_model_dtype):
+                         convert_model_dtype, attn_type,
+                         sage_attn_tune_kernel, sage_attn_print_tuned,
+                         ark_sage_block_size):
         """
         Configures a model object. This includes setting evaluation modes,
         applying distributed parallel strategy, and handling device placement.
@@ -149,11 +163,26 @@ class WanI2V:
         """
         model.eval().requires_grad_(False)
 
+        supported_attn_types = {"sdpa", "sage_triton", "ark_sa", "sycl_tla_fa"}
+        if attn_type not in supported_attn_types:
+            raise ValueError(f"Unsupported attn_type: {attn_type}")
+        if use_sp and attn_type in {"ark_sa", "sycl_tla_fa"}:
+            raise NotImplementedError(f"attn_type={attn_type} is not supported with sequence parallel")
+        logging.info("Using attention backend: %s", attn_type)
+
         if use_sp:
             for block in model.blocks:
                 block.self_attn.forward = types.MethodType(
                     sp_attn_forward, block.self_attn)
             model.forward = types.MethodType(sp_dit_forward, model)
+        else:
+            for block in model.blocks:
+                block.self_attn.set_attention_backend(
+                    attn_type,
+                    sage_attn_tune_kernel=sage_attn_tune_kernel,
+                    sage_attn_print_tuned=sage_attn_print_tuned,
+                    ark_sage_block_size=ark_sage_block_size,
+                )
 
         if dist.is_initialized():
             dist.barrier()

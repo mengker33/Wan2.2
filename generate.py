@@ -223,11 +223,36 @@ def _parse_args():
         default=False,
         help="Whether to convert model paramerters dtype.")
     parser.add_argument(
+        "--torch_compile",
+        action="store_true",
+        default=False,
+        help="Enable torch.compile for pipelines that support it.")
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        default=False,
+        help="Enable torch profiler for pipelines that support it.")
+    parser.add_argument(
         "--attn_type",
         type=str,
         default="sdpa",
-        choices=["sdpa", "sage_triton"],
-        help="The type of attention to use. Choose from 'sdpa', 'sage_triton'")
+        choices=["sdpa", "sage_triton", "ark_sa", "sycl_tla_fa"],
+        help="The type of attention to use. Choose from 'sdpa', 'sage_triton', 'ark_sa', 'sycl_tla_fa'")
+    parser.add_argument(
+        "--sage_attn_tune_kernel",
+        action="store_true",
+        default=False,
+        help="Enable Triton autotuning for the Sage attention backend.")
+    parser.add_argument(
+        "--sage_attn_print_tuned",
+        action="store_true",
+        default=False,
+        help="Print the selected tuned Sage attention kernel config once.")
+    parser.add_argument(
+        "--ark_sage_block_size",
+        type=int,
+        default=64,
+        help="Quantization block size used by the ARK SageAttention backend.")
 
     # animate
     parser.add_argument(
@@ -423,7 +448,12 @@ def generate(args):
             use_sp=(args.ulysses_size > 1),
             t5_cpu=args.t5_cpu,
             convert_model_dtype=args.convert_model_dtype,
+            torch_compile=args.torch_compile,
+            profile=args.profile,
             attn_type=args.attn_type,
+            sage_attn_tune_kernel=args.sage_attn_tune_kernel,
+            sage_attn_print_tuned=args.sage_attn_print_tuned,
+            ark_sage_block_size=args.ark_sage_block_size,
         )
 
         logging.info(f"Generating video ...")
@@ -450,7 +480,12 @@ def generate(args):
             use_sp=(args.ulysses_size > 1),
             t5_cpu=args.t5_cpu,
             convert_model_dtype=args.convert_model_dtype,
+            torch_compile=args.torch_compile,
+            profile=args.profile,
             attn_type=args.attn_type,
+            sage_attn_tune_kernel=args.sage_attn_tune_kernel,
+            sage_attn_print_tuned=args.sage_attn_print_tuned,
+            ark_sage_block_size=args.ark_sage_block_size,
         )
 
         logging.info(f"Generating video ...")
@@ -542,6 +577,10 @@ def generate(args):
             use_sp=(args.ulysses_size > 1),
             t5_cpu=args.t5_cpu,
             convert_model_dtype=args.convert_model_dtype,
+            attn_type=args.attn_type,
+            sage_attn_tune_kernel=args.sage_attn_tune_kernel,
+            sage_attn_print_tuned=args.sage_attn_print_tuned,
+            ark_sage_block_size=args.ark_sage_block_size,
         )
         logging.info("Generating video ...")
         t0 = time.time()
@@ -563,7 +602,7 @@ def generate(args):
     t1 = time.time()
     duration = t1 - t0
     if rank == 0:
-        print("Wan Generation Latency {:.1f} sec".format(duration))
+        print("-----------------Wan Generation Latency {:.1f} sec".format(duration))
 
     if rank == 0:
         if args.save_file is None:
