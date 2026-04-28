@@ -165,7 +165,7 @@ class WanTI2V:
         supported_attn_types = {"sdpa", "sage_triton", "ark_sa", "sycl_tla_fa"}
         if attn_type not in supported_attn_types:
             raise ValueError(f"Unsupported attn_type: {attn_type}")
-        if use_sp and attn_type in {"ark_sa", "sycl_tla_fa"}:
+        if use_sp and attn_type in {"ark_sa"}:
             raise NotImplementedError(f"attn_type={attn_type} is not supported with sequence parallel")
         logging.info("Using attention backend: %s", attn_type)
 
@@ -195,6 +195,7 @@ class WanTI2V:
             )
 
         if torch_compile:
+            logging.info("Using torch compile to optimize the model")
             model = torch.compile(model)
 
         return model
@@ -521,7 +522,6 @@ class WanTI2V:
             oh // self.vae_stride[1]) * (ow // self.vae_stride[2]) // (
                 self.patch_size[1] * self.patch_size[2])
         seq_len = int(math.ceil(seq_len / self.sp_size)) * self.sp_size
-
         seed = seed if seed >= 0 else random.randint(0, sys.maxsize)
         seed_g = torch.Generator(device=self.device)
         seed_g.manual_seed(seed)
@@ -634,12 +634,10 @@ class WanTI2V:
 
                     noise_pred_cond = self.model(
                         latent_model_input, t=timestep, **arg_c)[0]
-                    if offload_model:
-                        torch.xpu.empty_cache()
+
                     noise_pred_uncond = self.model(
                         latent_model_input, t=timestep, **arg_null)[0]
-                    if offload_model:
-                        torch.xpu.empty_cache()
+
                     noise_pred = noise_pred_uncond + guide_scale * (
                         noise_pred_cond - noise_pred_uncond)
 

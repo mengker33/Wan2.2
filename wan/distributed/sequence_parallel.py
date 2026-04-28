@@ -1,11 +1,18 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import torch
+import importlib
 
 from ..modules.model import sinusoidal_embedding_1d
 from ..modules.attention import attention
 from ..modules.sage_attention import sageattn_qk_int8_pv_fp16_triton
 from .ulysses import distributed_attention
 from .util import gather_forward, get_rank, get_world_size
+
+try:
+    importlib.import_module("sycl_tla_fmha")
+    from sycl_tla_fmha import prefill_bf16_tensor
+except ImportError:
+    prefill_bf16_tensor = None
 
 
 def pad_freqs(original_tensor, target_len):
@@ -59,7 +66,7 @@ def rope_apply(x, grid_sizes, freqs):
 
         # append to collection
         output.append(x_i)
-    return torch.stack(output).float()
+    return torch.stack(output).type_as(x)
 
 
 def sp_dit_forward(
@@ -176,6 +183,22 @@ def sp_attn_forward(self, x, seq_lens, grid_sizes, freqs, dtype=torch.bfloat16):
                 v=half(v),
                 tensor_layout='NHD',
             )
+        elif self.use_sycl_tla_fmha:
+            q_t = half(q).transpose(1, 2).contiguous()
+            k_t = half(k).transpose(1, 2).contiguous()
+            v_t = half(v).transpose(1, 2).contiguous()
+
+            x = prefill_bf16_tensor(
+                q=q_t,
+                k=k_t,
+                v=v_t,
+                is_causal=False,
+                iterations=1,
+                warmup=0,
+                verify=0,
+            )
+
+            x = x.to(torch.bfloat16).transpose(1, 2).contiguous()
         else:
             x = attention(half(q), half(k), half(v))
     else:

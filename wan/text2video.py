@@ -168,7 +168,7 @@ class WanT2V:
         supported_attn_types = {"sdpa", "sage_triton", "ark_sa", "sycl_tla_fa"}
         if attn_type not in supported_attn_types:
             raise ValueError(f"Unsupported attn_type: {attn_type}")
-        if use_sp and attn_type in {"ark_sa", "sycl_tla_fa"}:
+        if use_sp and attn_type in {"ark_sa"}:
             raise NotImplementedError(f"attn_type={attn_type} is not supported with sequence parallel")
         logging.info("Using attention backend: %s", attn_type)
 
@@ -177,6 +177,14 @@ class WanT2V:
                 block.self_attn.forward = types.MethodType(
                     sp_attn_forward, block.self_attn)
             model.forward = types.MethodType(sp_dit_forward, model)
+            if attn_type != "sdpa":
+                for block in model.blocks:
+                    block.self_attn.set_attention_backend(
+                        attn_type,
+                        sage_attn_tune_kernel=sage_attn_tune_kernel,
+                        sage_attn_print_tuned=sage_attn_print_tuned,
+                        ark_sage_block_size=ark_sage_block_size,
+                    )
         else:
             for block in model.blocks:
                 block.self_attn.set_attention_backend(
