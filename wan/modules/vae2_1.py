@@ -649,7 +649,7 @@ class Wan2_1_VAE:
         """
         with torch.autocast(device_type='xpu', dtype=self.dtype, enabled=True):
             return [
-                self.model.encode(u.unsqueeze(0), self.scale).float().squeeze(0)
+                self.model.encode(u.unsqueeze(0).float(), self.scale).float().squeeze(0)
                 for u in videos
             ]
 

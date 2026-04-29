@@ -542,6 +542,12 @@ def generate(args):
             use_sp=(args.ulysses_size > 1),
             t5_cpu=args.t5_cpu,
             convert_model_dtype=args.convert_model_dtype,
+            torch_compile=args.torch_compile,
+            profile=args.profile,
+            attn_type=args.attn_type,
+            sage_attn_tune_kernel=args.sage_attn_tune_kernel,
+            sage_attn_print_tuned=args.sage_attn_print_tuned,
+            ark_sage_block_size=args.ark_sage_block_size,
         )
         logging.info(f"Generating video ...")
         t0 = time.time()
